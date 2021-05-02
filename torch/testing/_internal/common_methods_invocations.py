@@ -145,6 +145,104 @@ def _getattr_qual(obj, name, default=_NOTHING):
         else:
             raise
 
+# NOTE: OpInfos and the OpInfo testing pattern
+# See also: https://github.com/pytorch/pytorch/wiki/Writing-tests-in-PyTorch-1.8
+# See also: https://github.com/pytorch/pytorch/issues/54261, which tracks
+#   which OpInfos we still want to create
+#
+# An "OpInfo", described by the class and subclasses below, is a collection
+#   of metadata related to a PyTorch operator, like torch.add. This metadata
+#   can be separated into three categories:
+#
+#     1) Metadata describing the operator, like "dtypesIfCPU", which describes
+#          the dtypes the operator supports on the CPU. This metadata
+#          is used by generated tests to understand what they should test
+#          and what the expected results of the test should be.
+#     2) Test directives, like "skips", which indicates that some generated
+#          tests should be skipped for this operator. Test directives
+#          directly control the behavior of generated tests.
+#     3) A "sample_inputs_func", a function that can generate valid inputs to
+#          the operator. Generating valid inputs is important for "black box"
+#          testing, like PyTorch's autograd tests, which can infer if an
+#          operator is behaving correctly just by observing how changes in
+#          to an operator's inputs affect its gradient computation.
+#
+# Most OpInfos are collected in the "op_db" sequence, although some specialized
+#   tests have their own OpInfo-based datastructures.
+#
+# OpInfos are intended to replace custom test generators, like "method_tests()"
+#   (see below) and the "tensor_op_tests" in test_torch.py. These generators
+#   proved hard to read and maintain, and having multiple operator lists
+#   was frequently confusing, with engineers not understanding what each
+#   list actually did. OpInfos hopes to address these issues and extend
+#   automated test coverage by consolidating these lists into one structured and
+#   documented list.
+#
+# Most tests that use every OpInfo are in test_ops.py. More correctly,
+#   test_ops.py contains "test templates" which are instantiated by
+#   PyTorch's "device generic test framework". See the developer Wiki article
+#   above for more information on this test instantiation process.
+#
+# In addition to the OpInfo base class, there are subclasses of OpInfos, like
+#   UnaryUfuncInfo, that extend the base class's supported metadata for
+#   a group of operator with a common structure. For example, the
+#   UnaryUfuncInfos have a "ref" (short for "reference") attribute that defines
+#   a NumPy or SciPy reference for them. These subclasses may have additional
+#   tests in their corresponding files. UnaryUfuncInfos, for example, have
+#   specialized tests in test_unary_ufuncs.py. In the future BinaryUfuncInfos
+#   and ReductionInfos will be created and specialized tests added for them,
+#   too.
+#
+# When an OpInfo is added tests for it are automatically generated based on
+#   its metadata and the templated tests defined in PyTorch's test suite
+#   that use the @ops decorator. Again, for more on this process see the
+#   linked developer Wiki article. Knowing what, exactly, is tested when
+#   adding an OpInfo requires reading the corresponding test files, but
+#   test_ops.py, where the majority of tests live, can be thought of as
+#   validating the following (as of this writing):
+#
+#     1) That an operator's function, method, and inplace variants (if they
+#          exist) perform the same computation.
+#     2) That an operator's aliases, if any, perform the same computation.
+#     3) That an operator implements its gradient and second-order gradient
+#          correctly.
+#     4) That an operators works when traced or scripted by the jit.
+#     5) That operators supporting out= do so correctly.
+#     6) That operators specify metadata, like which dtypes they support,
+#          properly.
+#
+# Note that none of these tests validate the operator actually computes what
+#   it's supposed to. As mentioned previously, OpInfo-based tests can
+#   typically only treat operators as "black boxes." Only in special cases, like
+#   with the UnaryUfuncInfos, have tests been developed that understand the
+#   structure of those operations and that can validate they compute as
+#   as expected.
+#
+# When implementing a new operator, then, an OpInfo should be added, but
+#   (unless the operator being added is in a special class with tests that
+#   can validate its computation) additional tests still need to be added
+#   to verify the operator computes what it's expected to. Even though there
+#   are many linalg ops with OpInfos, for instance, there are still
+#   comprehensive handwritten tests for these operators in test_linalg.py.
+#   What doesn't need to handwritten testing are the propertes listed above,
+#   except in rare cases where the generated tests are insufficient or
+#   unable to handle the operator.
+#
+# Adding an OpInfo may seem confusing because the base OpInfo class has
+#   a lot of attributes, but luckily most OpInfos don't require all of them,
+#   or even a majority of them, be changed from their defaults.
+#   Looking at OpInfos for similar operators to the one you're adding
+#   is usually a good way to start. OpInfo tests should also be designed so
+#   that if metadata is incorrectly added for an operator they tell you how to
+#   correct it. For example, if you add bfloat16 to "dtypesIfCUDA", but the
+#   operation doesn't actually support bfloat16 on CUDA, then a test will fail
+#   and indicate the operation threw an error when given bfloat16 inputs on a
+#   CUDA device. You can run all the basic OpInfo tests for your operator by
+#   filtering test_ops.py using the operator's name.
+#
+# The OpInfo attributes have comments, but documentation can always be
+#   better. If you're working on an OpInfo and confused by something, please
+#   create an issue or ping @mruberry on your PR.
 
 # Classes and methods for the operator database
 class OpInfo(object):
