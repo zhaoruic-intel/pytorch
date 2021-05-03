@@ -990,7 +990,7 @@ class TestAsserts(TestCase):
         expected = torch.tensor([[1, 2], [5, 4]], device=device)
 
         for fn in self.assert_fns_with_inputs(actual, expected):
-            with self.assertRaisesRegex(AssertionError, re.escape("Greatest absolute difference: 2 at (1, 0)")):
+            with self.assertRaisesRegex(AssertionError, re.escape("Greatest absolute difference: 2.00e+00 at (1, 0)")):
                 fn()
 
     @onlyCPU
@@ -999,7 +999,7 @@ class TestAsserts(TestCase):
         expected = torch.tensor(2, device=device)
 
         for fn in self.assert_fns_with_inputs(actual, expected):
-            with self.assertRaisesRegex(AssertionError, re.escape("Absolute difference: 1")):
+            with self.assertRaisesRegex(AssertionError, re.escape("Absolute difference: 1.00e+00")):
                 fn()
 
     @onlyCPU
@@ -1008,7 +1008,7 @@ class TestAsserts(TestCase):
         expected = torch.tensor([[1, 4], [3, 4]], device=device)
 
         for fn in self.assert_fns_with_inputs(actual, expected):
-            with self.assertRaisesRegex(AssertionError, re.escape("Greatest relative difference: 0.5 at (0, 1)")):
+            with self.assertRaisesRegex(AssertionError, re.escape("Greatest relative difference: 5.00e-01 at (0, 1)")):
                 fn()
 
     @onlyCPU
@@ -1035,7 +1035,7 @@ class TestAsserts(TestCase):
         expected = torch.tensor(2, device=device)
 
         for fn in self.assert_fns_with_inputs(actual, expected):
-            with self.assertRaisesRegex(AssertionError, re.escape("Relative difference: 0.5")):
+            with self.assertRaisesRegex(AssertionError, re.escape("Relative difference: 5.00e-01")):
                 fn()
 
     @onlyCPU
@@ -1048,7 +1048,7 @@ class TestAsserts(TestCase):
         ):
             for inputs in self.make_inputs(actual, expected):
                 with self.assertRaisesRegex(
-                        AssertionError, re.escape(f"(up to {rtol} allowed)")
+                        AssertionError, re.escape(f"(up to {rtol:.2e} allowed)")
                 ):
                     torch.testing.assert_close(*inputs, rtol=rtol, atol=0.0)
 
@@ -1062,7 +1062,7 @@ class TestAsserts(TestCase):
         ):
             for inputs in self.make_inputs(actual, expected):
                 with self.assertRaisesRegex(
-                        AssertionError, re.escape(f"(up to {atol} allowed)")
+                        AssertionError, re.escape(f"(up to {atol:.2e} allowed)")
                 ):
                     torch.testing.assert_close(*inputs, rtol=0.0, atol=atol)
 
