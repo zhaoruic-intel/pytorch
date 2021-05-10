@@ -24,12 +24,20 @@ import torch.distributed.rpc
 from torch._utils_internal import get_source_lines_and_file
 from torch.futures import Future
 import torch.package._mangling as package_mangling
-from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union  # noqa: F401
+from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, Type, TypeVar, Union  # noqa: F401
 
 if sys.version_info[:2] > (3, 7):
     from typing import Final
 else:
     from typing_extensions import Final
+
+LockType: Type
+try:
+    import _thread
+    LockType = _thread.LockType
+except ImportError:
+    import _dummy_thread
+    LockType = _dummy_thread.LockType
 
 # Wrapper functions that can call either of 2 functions depending on a boolean
 # argument
@@ -1132,8 +1140,15 @@ class _TensorExtractor(pickle.Pickler):
         if isinstance(obj, torch.Tensor):
             self.tensors.append(obj)
             return ""
-        else:
-            return None
+        # Since we just want to extract tensors, we don't mind if an object is
+        # unpicklable if it doesn't contain tensors, as we can just ignore/skip
+        # it. To play it safe, we only do so for common objects that we're sure
+        # don't contain tensors. Feel free to add new types gere. Note also that
+        # even if a type isn't listed here this won't block users, since thet
+        # can just add a __getstate__ or __reduce__ method to their class.
+        if isinstance(obj, LockType):
+            return ""
+        return None
 
 
 def _extract_tensors(obj):
