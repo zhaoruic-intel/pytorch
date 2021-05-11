@@ -81,7 +81,8 @@ using namespace at::native::metal;
   if (state) {
     return state;
   }
-  id<MTLFunction> func = [_library newFunctionWithName:[NSString stringWithUTF8String:kernel.c_str()]];
+  id<MTLFunction> func = [_library
+      newFunctionWithName:[NSString stringWithUTF8String:kernel.c_str()]];
   TORCH_CHECK(func, "Failed to load the Metal Shader function: ", kernel);
   NSError* errors;
   state = [_device newComputePipelineStateWithFunction:func error:&errors];
@@ -90,9 +91,9 @@ using namespace at::native::metal;
   return state;
 }
 
-- (id<MTLComputePipelineState>)specializedPipelineState:(const std::string&)kernel
-                                              Constants:(NSArray<NSNumber*>*)
-                                                            constants {
+- (id<MTLComputePipelineState>)
+    specializedPipelineState:(const std::string&)kernel
+                   Constants:(NSArray<NSNumber*>*)constants {
   TORCH_CHECK(_library, "Failed to load Metal shaders");
   std::string kernelStr = kernel;
   for (auto i = 0; i < constants.count; ++i) {
@@ -129,9 +130,10 @@ using namespace at::native::metal;
     }
   }
   NSError* errors;
-  id<MTLFunction> func = [_library newFunctionWithName:[NSString stringWithUTF8String:kernel.c_str()]
-                                        constantValues:constantValues
-                                                 error:&errors];
+  id<MTLFunction> func = [_library
+      newFunctionWithName:[NSString stringWithUTF8String:kernel.c_str()]
+           constantValues:constantValues
+                    error:&errors];
   TORCH_CHECK(func, errors.localizedDescription.UTF8String);
   state = [_device newComputePipelineStateWithFunction:func error:&errors];
   TORCH_CHECK(state, errors.localizedDescription.UTF8String);

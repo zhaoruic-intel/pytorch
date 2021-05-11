@@ -35,7 +35,10 @@ MPSTemporaryImage* createTemporaryImage(
     MPSImage* image);
 
 void copyToHost(float* dst, MPSImage* image);
-void copyToMetalBuffer(MetalCommandBuffer* buffer, id<MTLBuffer> dst, MPSImage* image);
+void copyToMetalBuffer(
+    MetalCommandBuffer* buffer,
+    id<MTLBuffer> dst,
+    MPSImage* image);
 
 std::vector<fp16_t> staticImageToFp16Array(MPSImage* image);
 at::Tensor staticImageToTensor(MPSImage* image);
@@ -65,7 +68,7 @@ static inline std::vector<int64_t> computeImageSize(IntArrayRef sizes) {
   int64_t batch = 1;
   for (int i = sizes.size() - 1; i >= 0; i--) {
     if (index != 0) {
-        imageSize[index] = sizes[i];
+      imageSize[index] = sizes[i];
       index--;
       continue;
     }
