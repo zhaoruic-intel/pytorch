@@ -89,8 +89,8 @@ jit_core_sources = [
 # list for the shared files.
 
 core_sources_common = [
-    "torch/csrc/autograd/profiler_legacy.cpp",
-    "torch/csrc/autograd/profiler_kineto.cpp",
+    # "torch/csrc/autograd/profiler_legacy.cpp",
+    # "torch/csrc/autograd/profiler_kineto.cpp",
     "torch/csrc/autograd/profiler_utils.cpp",
     "torch/csrc/autograd/autograd_meta.cpp",
     "torch/csrc/autograd/forward_grad.cpp",
@@ -110,6 +110,11 @@ core_sources_common = [
 ]
 
 libtorch_sources_common = core_sources_common
+
+libtorch_profiler_sources = [
+    "torch/csrc/autograd/profiler_legacy.cpp",
+    "torch/csrc/autograd/profiler_kineto.cpp",
+]
 
 core_trainer_sources = [
     "torch/csrc/autograd/anomaly_mode.cpp",
@@ -305,7 +310,7 @@ core_sources_full = core_sources_full_mobile + [
     "torch/csrc/jit/tensorexpr/external_functions_codegen.cpp",
 ]
 
-libtorch_core_sources = sorted(core_sources_common + core_sources_full + core_trainer_sources)
+libtorch_core_sources = sorted(core_sources_common + core_sources_full + core_trainer_sources + libtorch_profiler_sources)
 
 libtorch_distributed_sources = [
     "torch/csrc/distributed/autograd/autograd.cpp",
