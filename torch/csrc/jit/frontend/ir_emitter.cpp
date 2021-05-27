@@ -1320,13 +1320,35 @@ struct to_ir {
     pushFrame(comprehension_block);
     WithInsertPoint guard(comprehension_block);
     auto emit_body = [&]() {
-      auto comprehension_out = emitExpr(lc.elt());
+      Value* out = emitExpr(lc.elt());
+
+      // Make sure that any element types are subtypes of the annotated
+      // type
+      std::stringstream ss;
+      if (type_hint &&
+          !out->type()->isSubtypeOfExt(
+              type_hint->expect<ListType>()->getElementType(), &ss)) {
+        throw ErrorReport(loc) << "List type annotation did not match "
+                               << "the types of the actual list items\n"
+                               << ss.str();
+      }
+
+      // If we didn't have a type annotation, the type of the list would
+      // be set to `Tensor`. We don't want to unify this default type
+      // with the actual elements in the list, so let the type begin as
+      // the first element in the list
       if (!type_set) {
-        list_value->setType(ListType::create(comprehension_out->type()));
+        list_value->setType(ListType::create(out->type()));
         type_set = true;
       }
+
+      ListTypePtr lt = list_value->type()->expect<ListType>();
+      auto unified = unifyTypes(
+          lt->getElementType(), out->type(), /*default_to_any=*/true);
+      list_value->setType(ListType::create(*unified));
+
       NamedValue self = NamedValue(loc, "self", list_value);
-      NamedValue input = NamedValue(loc, "", comprehension_out);
+      NamedValue input = NamedValue(loc, "", out);
       emitBuiltinCall(loc, *graph, aten::append, {input}, {}, self);
     };
     emitFor(targets_list, itrs, loc, emit_body);
@@ -1365,10 +1387,33 @@ struct to_ir {
     auto emit_body = [&]() {
       auto k = emitExpr(dc.key());
       auto v = emitExpr(dc.value());
+
+      // Make sure that any key and value types are subtypes of the
+      // annotatated key/value types
+      if (type_hint) {
+        DictTypePtr dict_type_hint = type_hint->expect<DictType>();
+        if (!k->type()->isSubtypeOf(dict_type_hint->getKeyType()) ||
+            !v->type()->isSubtypeOf(dict_type_hint->getValueType())) {
+          throw ErrorReport(loc) << "Dict type annotation did not match "
+                                 << "the types of the actual dict items";
+        }
+      }
+
+      // If we didn't have a type annotation, let the type begin as the
+      // first key/value pair in the dict
       if (!type_set) {
         dict_value->setType(DictType::create(k->type(), v->type()));
         type_set = true;
       }
+
+      DictTypePtr dt = dict_value->type()->expect<DictType>();
+
+      c10::optional<TypePtr> unified = unifyTypes(
+          dt->getValueType(),
+          v->type(),
+          /*default_to_any=*/true);
+      dict_value->setType(DictType::create(k->type(), *unified));
+
       NamedValue self = NamedValue(loc, "self", dict_value);
       NamedValue input_k = NamedValue(loc, "", k);
       NamedValue input_v = NamedValue(loc, "", v);
@@ -3533,6 +3578,65 @@ struct to_ir {
             ->call(tree->range(), method, named_values, {}, 0));
   }
 
+  Value* emitListLiteral(ListLiteral ll, TypePtr type_hint) {
+    auto values = getValues(ll.inputs(), /*maybe_unpack=*/true);
+
+    // Determine the element type of the list. If we have a type hint
+    // of `List[T]`, use `T`. If the list is non-empty, find the
+    // greatest common supertype of all the list elements (defaulting to
+    // `Any` as a catch-all supertype). Assume `[]` is `List[Tensor]`
+    TypePtr elem_type = TensorType::get();
+    bool type_set = false;
+    if (type_hint) {
+      if (type_hint->kind() == TypeKind::ListType) {
+        elem_type = type_hint->expectRef<ListType>().getElementType();
+        type_set = true;
+      } else {
+        // If the type hint was not `List[T]`, throw an error
+        throw ErrorReport(ll) << "Expected a List type hint but instead got "
+                              << type_hint->repr_str();
+      }
+    }
+    if (!values.empty()) {
+      std::stringstream ss;
+      auto types = fmap(values, [](const Value* v) { return v->type(); });
+      c10::optional<TypePtr> rhs_type =
+          unifyTypeList(types, ss, /*default_to_any=*/true);
+
+      if (!type_set) {
+        elem_type = *rhs_type;
+      }
+
+      // This should really be an error. However, it looks like some of
+      // our test cases relied the annotation not being checked against
+      // the actual list values, so this condition is left as a warning
+      // for backwards compatibility
+      if (!(*rhs_type)->isSubtypeOf(elem_type)) {
+        TORCH_WARN(
+            "List annotation ",
+            type_hint->repr_str(),
+            " did "
+            "not match the types of the given list elements, which were "
+            "unified to ",
+            (*rhs_type)->repr_str());
+      }
+
+      if (*rhs_type == AnyType::get()) {
+        TORCH_WARN(
+            "List consists of heterogeneous types, which means",
+            " that it has been typed as `List[Any]`. To use "
+            "any of the values in the List, it will be "
+            "necessary to add an `assert isinstance` statement "
+            "before first use to trigger type refinement\n",
+            ll.range().str());
+      }
+    }
+
+    Value* result =
+        graph->insertNode(graph->createList(elem_type, values))->output();
+    return result;
+  }
+
   Value* emitSimpleExpr(
       const TreeRef& tree,
       const TypePtr& type_hint = nullptr) {
@@ -3615,46 +3719,7 @@ struct to_ir {
       } break;
       case TK_LIST_LITERAL: {
         auto ll = ListLiteral(tree);
-        auto values = getValues(ll.inputs(), /*maybe_unpack=*/true);
-
-        // determine the element type of the list
-        // if we have a type hint of List[T], use T
-        // if the list is non-empty use type_of(list[0])
-        // otherwise assume it is List[Tensor]
-        TypePtr elem_type = TensorType::get();
-        if (type_hint) {
-          if (type_hint->kind() == TypeKind::ListType) {
-            elem_type = type_hint->expectRef<ListType>().getElementType();
-          } else {
-            // If the type hint was not a List[T] throw an error
-            throw ErrorReport(tree)
-                << "Expected a List type hint but instead got "
-                << type_hint->repr_str();
-          }
-        } else if (!values.empty()) {
-          std::stringstream ss;
-          auto types = fmap(values, [](const Value* v) { return v->type(); });
-          auto maybe_elem_type = unifyTypeList(types, ss);
-          if (!maybe_elem_type) {
-            throw ErrorReport(tree) << "Lists must contain only a single type\n"
-                                    << ss.str();
-          }
-          elem_type = maybe_elem_type.value();
-        }
-
-        for (auto v : values) {
-          std::stringstream ss;
-          if (!v->type()->isSubtypeOfExt(elem_type, &ss)) {
-            throw ErrorReport(tree)
-                << "Lists must contain only a single type, expected: "
-                << elem_type->repr_str() << " but found "
-                << v->type()->repr_str() << " instead.\n"
-                << ss.str();
-          }
-        }
-        Value* result =
-            graph->insertNode(graph->createList(elem_type, values))->output();
-        return result;
+        return emitListLiteral(ll, type_hint);
       } break;
       case TK_TUPLE_LITERAL: {
         auto ll = TupleLiteral(tree);
@@ -3689,24 +3754,79 @@ struct to_ir {
         }
         AT_ASSERT(key_type != nullptr && value_type != nullptr);
 
-        auto checkTypeOfValues = [](const TypePtr& type,
-                                    const char* what,
-                                    const std::vector<Value*>& values,
-                                    TreeList trees) {
-          for (size_t i = 0, N = values.size(); i < N; ++i) {
-            std::stringstream ss;
-            if (!values[i]->type()->isSubtypeOfExt(type, &ss)) {
-              throw ErrorReport(trees[i])
-                  << "Dict " << what
-                  << " must contain only a single type, expected: "
-                  << type->repr_str() << " but found "
-                  << values[i]->type()->repr_str() << " instead.\n"
-                  << ss.str();
+        for (size_t i = 0, N = keys.size(); i < N; ++i) {
+          std::stringstream ss;
+          if (!keys[i]->type()->isSubtypeOfExt(key_type, &ss)) {
+            throw ErrorReport(key_trees[i])
+                << "Dict keys must contain "
+                << "only a single type, expected: " << key_type->repr_str()
+                << " but found " << keys[i]->type()->repr_str() << " instead.\n"
+                << ss.str();
+          }
+        }
+
+        if (!values.empty()) {
+          // Get the smallest common supertype of all the values. We
+          // need to use the O(N^2) algorithm instead of using
+          // `std::accumulate` to account for the case that two types
+          // cannot themselves be unified, but there exists some mutual
+          // parent type later in `values`. (E.g. T2 <: T1, T3 <: T1,
+          // `values` = {T2, T3, T1}. The real supertype should be `T1`,
+          // not `Any`)
+
+          // List of possible parent types
+          std::vector<TypePtr> seen;
+
+          auto get_greater_type =
+              [](const TypePtr t1, const TypePtr t2) -> c10::optional<TypePtr> {
+            if (t1->isSubtypeOf(t2)) {
+              return t2;
+            } else if (t2->isSubtypeOf(t1)) {
+              return t1;
+            } else {
+              return c10::nullopt;
+            }
+          };
+
+          auto value_types =
+              c10::fmap(values, [](Value* v) { return v->type(); });
+
+          for (const TypePtr type : value_types) {
+            bool added = false;
+            for (size_t i = 0; i < seen.size(); ++i) {
+              // Don't bother compare if it's already in our list of
+              // possible supertypes
+              if (type == seen[i]) {
+                continue;
+              }
+              auto maybe_parent = get_greater_type(type, seen[i]);
+              if (maybe_parent && *maybe_parent == type) {
+                seen[i] = type;
+                added = true;
+              }
+            }
+            if (!added) {
+              seen.push_back(type);
             }
           }
-        };
-        checkTypeOfValues(key_type, "keys", keys, key_trees);
-        checkTypeOfValues(value_type, "values", values, value_trees);
+
+          TypePtr inferred_type = seen.size() == 1 ? seen[0] : AnyType::get();
+
+          std::stringstream ss;
+          TORCH_CHECK(
+              !type_hint ||
+                  inferred_type->isSubtypeOf(
+                      type_hint->expect<DictType>()->getValueType()),
+              "Type hint for dict values was ",
+              type_hint->repr_str(),
+              " but the greatest common supertype of the given values",
+              " was ",
+              inferred_type->repr_str(),
+              "\n",
+              ss.str());
+
+          value_type = inferred_type;
+        }
 
         return graph
             ->insertNode(graph->createDict(key_type, value_type, keys, values))
@@ -3806,8 +3926,8 @@ struct to_ir {
     return emitBuiltinCall(loc, *graph, aten::slice, args, {step_nv});
   }
 
-  // Desugars slice indexing: tensor[begin:end] -> tensor.slice(dim, begin, end,
-  // 1)
+  // Desugars slice indexing: tensor[begin:end] -> tensor.slice(dim, begin,
+  // end, 1)
   Value* emitSlice(
       const SourceRange& loc,
       Value* input,
@@ -3836,9 +3956,9 @@ struct to_ir {
       const SourceRange& loc,
       Value* input,
       at::ArrayRef<Value*> indices) {
-    // NB: the index of aten::index should be a type of List[Optional[Tensor]],
-    // this is to support the case like t[:, :, 1] where : here indicates a
-    // None/undefined tensor(optional tensor)
+    // NB: the index of aten::index should be a type of
+    // List[Optional[Tensor]], this is to support the case like t[:, :, 1]
+    // where : here indicates a None/undefined tensor(optional tensor)
     auto* index =
         graph->insertNode(graph->createList(OptionalType::ofTensor(), indices))
             ->output();
@@ -3850,24 +3970,24 @@ struct to_ir {
   // - Value*: the input after it has been indexed by int and slice indices.
   // - vector<Value*>: A list of tensor Value* indices that have not been
   // applied yet.
-  //   Should be NULL at indices where sliceable (post-slicing) isn't indexed by
-  //   a tensor.
+  //   Should be NULL at indices where sliceable (post-slicing) isn't indexed
+  //   by a tensor.
   std::pair<Value*, std::vector<Value*>> emitIntAndSliceIndexing(
       const SourceRange& loc,
       Value* sliceable,
       const List<Expr>& subscript_exprs) {
     // Overall, to handle indexing (other than Tensors), we need to handle a
-    // couple different things. For example, for x[1:3, None, 4], each of these
-    // different index types (slice, None, and integer) result in different
-    // number of dimensions. Slicing doesn't change the number of dimensions,
-    // None adds a dimension, and integer removes a dimension. As these indexing
-    // operations are applied left to right, the actual index that it's being
-    // applied to depends on the previous operations. Ellipses indexing throws
-    // another wrinkle. Ellipses selects any remaining unspecified dimensions.
-    // Thus, for indexes following an ellipses, the actual index an indexing
-    // operation is being applied to depends on the operations to the right.
-    // Thus, we do two passes, one from left to right up until the ellipses, and
-    // one from right to left.
+    // couple different things. For example, for x[1:3, None, 4], each of
+    // these different index types (slice, None, and integer) result in
+    // different number of dimensions. Slicing doesn't change the number of
+    // dimensions, None adds a dimension, and integer removes a dimension. As
+    // these indexing operations are applied left to right, the actual index
+    // that it's being applied to depends on the previous operations. Ellipses
+    // indexing throws another wrinkle. Ellipses selects any remaining
+    // unspecified dimensions. Thus, for indexes following an ellipses, the
+    // actual index an indexing operation is being applied to depends on the
+    // operations to the right. Thus, we do two passes, one from left to right
+    // up until the ellipses, and one from right to left.
 
     std::vector<Value*> tensor_indices;
 
@@ -4029,8 +4149,9 @@ struct to_ir {
             false, "Trying to process index type that we don't support.");
       }
     }
-    // at::index takes in a List[Optional[Tensor]] where some dims can be None.
-    // create None node with optional tensor output type and pass to at::index.
+    // at::index takes in a List[Optional[Tensor]] where some dims can be
+    // None. create None node with optional tensor output type and pass to
+    // at::index.
     for (auto& index : tensor_indices) {
       if (index == nullptr) {
         index = graph->insertNode(graph->createNone())->output();
@@ -4056,7 +4177,8 @@ struct to_ir {
   // slicing/selecting. Call the tensor after we've applied slice / select the
   // `sliced`. tensor_indices should have the same size as sliced.dim():
   // - tensor_indices[i] = NULL if we should not index `sliced` at dim i
-  // - tensor_indices[i] = t if we should index `sliced` at dim i with tensor t.
+  // - tensor_indices[i] = t if we should index `sliced` at dim i with tensor
+  // t.
   Value* emitMultidimSlicing(
       const SourceRange& loc,
       Value* sliceable,
@@ -4316,7 +4438,8 @@ struct FunctionResolver : public Resolver {
 
 CompilationUnit::CompilationUnit(const std::string& source)
     : CompilationUnit() {
-  // calles the define with native resolver to generate the graph for functions
+  // calles the define with native resolver to generate the graph for
+  // functions
   define(c10::nullopt, source, nativeResolver(), nullptr);
 }
 
@@ -4393,8 +4516,8 @@ std::unique_ptr<Function> CompilationUnit::define(
         std::make_shared<FunctionResolver>(resolver.get(), function_table);
   }
   auto creator = [def, _resolver, self](Function& method) {
-    // Store the function name so that it can be referenced if there is an error
-    // while compiling this function
+    // Store the function name so that it can be referenced if there is an
+    // error while compiling this function
     std::string call_name = method.qualname().name();
     if (self) {
       auto atoms = method.qualname().atoms();
@@ -4483,8 +4606,9 @@ std::vector<Function*> CompilationUnit::define(
     record_function(std::move(fn));
   }
 
-  // We need to compile `__init__` first, since it can determine what attributes
-  // are available to other methods. So reorder the definitions accordingly.
+  // We need to compile `__init__` first, since it can determine what
+  // attributes are available to other methods. So reorder the definitions
+  // accordingly.
   for (auto& kv : function_table) {
     if (kv.first == "__init__") {
       kv.second->ensure_defined();
