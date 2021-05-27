@@ -1197,7 +1197,7 @@ struct to_ir {
       }
     }
     if (const auto union_type = lhs_value->type()->cast<UnionType>()) {
-      UnionTypePtr remaining = union_type->withoutNone();
+      TypePtr remaining = union_type->withoutNone();
       Refinement present(name, remaining);
       if (tok == TK_IS) {
         return RefinementSet({}, {present});

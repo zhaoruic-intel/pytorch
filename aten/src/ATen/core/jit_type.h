@@ -37,8 +37,12 @@ struct TypeEqual {
 
 struct IValue;
 struct FunctionSchema;
-struct NamedType;
 using OptNameList = c10::optional<std::vector<std::string>>;
+
+// Forward declarations for use in certain method signatures
+struct NamedType;
+struct OptionalType;
+using OptionalTypePtr = std::shared_ptr<OptionalType>;
 
 struct AnyType;
 using AnyTypePtr = std::shared_ptr<AnyType>;
@@ -115,7 +119,11 @@ struct TORCH_API UnionType : public Type {
 
   std::string str() const;
 
+  // If `types.size() == 1`, then `create` will throw while
+  // `maybeCreate` will return `types[0]`. Both factory functions throw
+  // if `types.empty()`
   static UnionTypePtr create(std::vector<TypePtr> types);
+  static TypePtr maybeCreate(std::vector<TypePtr> types);
 
   bool operator==(const Type& rhs) const override;
 
@@ -136,6 +144,10 @@ struct TORCH_API UnionType : public Type {
     return types_;
   }
 
+  TypePtr createWithContained(std::vector<TypePtr> contained_types) const override {
+    return create(contained_types);
+  }
+
   bool canHoldNone() const {
     return can_hold_none_;
   }
@@ -146,7 +158,7 @@ struct TORCH_API UnionType : public Type {
 
   c10::optional<TypePtr> toOptional(bool unification_allowed=false) const;
 
-  UnionTypePtr withoutNone() const;
+  TypePtr withoutNone() const;
 
  protected:
     UnionType(std::vector<TypePtr> types, TypeKind kind=TypeKind::UnionType);
@@ -156,35 +168,38 @@ struct TORCH_API UnionType : public Type {
   std::vector<TypePtr> types_;
   bool can_hold_none_;
 
-  std::string annotation_str_impl(TypePrinter printer) const {
-    std::stringstream ss;
-    ss << "Union[";
-    for (size_t i = 0; i < types_.size(); ++i) {
-      if (i > 0)
-        ss << ", ";
-      ss << types_[i]->annotation_str(printer);
-    }
-    ss << "]";
-    return ss.str();
-  }
+  std::string annotation_str_impl(TypePrinter printer) const override;
+  std::string unionStr(c10::optional<TypePrinter> printer) const;
 
 };
 
-struct OptionalType;
-using OptionalTypePtr = std::shared_ptr<OptionalType>;
 // This type represents an optional type. There is one `Optional` for
-// each element type. `Optional[T]` can accept both `T` and
-// `None`(`c10::nullopt` in C++)
+// each element type. `Optional[T]` represents a Union of two elements:
+// `T` and `None`, where T is not itself `Union` or `Optional`
+//
 // Subtype hierarchy for Optional:
 //     - Optional[T] <: Optional[R] iff T <: R
 //     - T <: Optional[R] if T <: R
 //     - None <: Optional[T] for all T
 //     - Optional[T] == Union[T, None] for all T
+//
+// `Optional[T]` should be represented as `Union[T, None]` whenever
+// possible. The only times we want to use an actual `OptionalType` is
+// when it's only possible to perform a certain operation with this
+// special case of `Union`, e.g. in schema matching.
 struct TORCH_API OptionalType : public UnionType {
-  static OptionalTypePtr create(TypePtr contained) {
-    TORCH_INTERNAL_ASSERT(contained, "OptionalType requires a valid TypePtr");
-    return OptionalTypePtr(new OptionalType(std::move(contained)));
-  }
+
+  // `create` dispatches to `UnionType::maybeCreate`, so it will never
+  // actually return an Optional (though it may return a Union that can
+  // be cast to an Optional through `UnionType::toOptional`). On the
+  // other hand, `strictCreate` will return an `OptionalType` or throw.
+  // `create` should be preferred over `strictCreate`, as we would like
+  //  to use `UnionType` wherever possible
+  static TypePtr create(TypePtr contained);
+  static c10::optional<OptionalTypePtr> strictCreate(TypePtr contained);
+
+  // Wrapper for pybind11
+  static OptionalTypePtr strictCreateOrThrow(TypePtr contained);
 
   static const TypeKind Kind = TypeKind::OptionalType;
 
@@ -1806,8 +1821,8 @@ struct getTypePtr_<c10::Dict<K, V>> final {
 template <class T>
 struct getTypePtr_<at::optional<T>> final {
   static TypePtr call() {
-    static auto type = OptionalType::create(getTypePtr_<T>::call());
-    return type;
+    static auto type = OptionalType::strictCreate(getTypePtr_<T>::call());
+    return *type;
   }
 };
 template <class... Contained>
@@ -1834,6 +1849,7 @@ inline TypePtr getTypePtr() {
 }
 
 using TypeEnv = std::unordered_map<std::string, TypePtr>;
+
 struct MatchTypeReturn {
   MatchTypeReturn(std::string reason) : reason_(std::move(reason)) {}
   static MatchTypeReturn Success() {
