@@ -747,7 +747,9 @@ bool Value::mustBeNone() const {
 }
 bool Value::mustNotBeNone() const {
   return node_->kind() != prim::AutogradAdd && type() != NoneType::get() &&
-      !type()->cast<OptionalType>();
+      !type()->cast<OptionalType>() &&
+      !(type()->cast<UnionType>() &&
+        type()->expect<UnionType>()->canHoldNone());
 }
 
 std::string Value::debugNameBase() const {
@@ -977,7 +979,7 @@ bool Node::mustBeNone() const {
       (outputs().size() == 1 && output()->type() == NoneType::get()) ||
       // It's a constant optional with no value in the attributes.
       (kind_ == prim::Constant && !this->hasAttributes() &&
-       output()->type()->cast<OptionalType>());
+       output()->type()->kind() == OptionalType::Kind);
 }
 
 void Node::dump() const {
@@ -1694,20 +1696,23 @@ Node* Graph::createEnumValue(Value* e) {
   return n;
 }
 
-Node* Graph::createList(const TypePtr& elem_type, at::ArrayRef<Value*> values) {
+Node* Graph::createList(
+    const TypePtr& contained_type,
+    at::ArrayRef<Value*> values) {
   auto n = create(prim::ListConstruct, values);
   for (const auto& v : values) {
     TORCH_CHECK(
-        v->type()->isSubtypeOf(elem_type),
+        v->type()->isSubtypeOf(contained_type),
         "Expected a list element that subtypes '",
-        elem_type->repr_str(),
+        contained_type->repr_str(),
         "' but got an element of type '",
         v->type()->repr_str(),
         "'");
   }
-  n->output()->setType(ListType::create(elem_type));
+  n->output()->setType(ListType::create(contained_type));
   return n;
 }
+
 Node* Graph::createListUnpack(Value* v, size_t size) {
   ListTypePtr list_type = v->type()->expect<ListType>();
   TypePtr elem_type = list_type->getElementType();
