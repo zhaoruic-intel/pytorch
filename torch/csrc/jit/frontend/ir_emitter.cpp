@@ -1689,7 +1689,7 @@ struct to_ir {
       // it's acting as a flag)
       c10::optional<TypePtr> full_true_type = environment_stack->getType(x);
       c10::optional<TypePtr> full_false_type = environment_stack->getType(x);
-      if (full_true_type && full_false_type) {
+      if (full_true_type && full_false_type && !unified) {
         unified = unifyTypes(*full_true_type, *full_false_type);
       }
 
