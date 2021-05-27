@@ -24,6 +24,17 @@ struct Function;
 
 namespace c10 {
 
+// Better type comparison, since `operator=` doesn't work if the
+// pointers are different. We compare on Kind (fast), then compare by
+// the serialized representation (slower, but guaranteed to break ties).
+// This is a struct so that it can be used in certain std container
+// types.
+struct TypeEqual {
+  bool operator()(const TypePtr& a, const TypePtr& b) const {
+    return a->kind() == b->kind() && a->str() == b->str();
+  }
+};
+
 struct IValue;
 struct FunctionSchema;
 struct NamedType;

@@ -410,3 +410,131 @@ class TestUnion(JitTestCase):
                 return x
 
         self.checkModule(M(1), ("foo",))
+
+    def test_union_type_refinement(self):
+        def fn(x: Union[int, str]) -> str:
+            if isinstance(x, str):
+                z = x + "bar"
+                return x
+            else:
+                return "baz"
+
+        self.checkScript(fn, ("foo",))
+        self.checkScript(fn, (1,))
+
+    def test_union_type_refinement_tuple(self):
+        def fn(x: Union[int, float, List[str]]) -> str:
+            if isinstance(x, (int, float)):
+                if isinstance(x, int):
+                    return str(x)
+                else:
+                    return "foo"
+            else:
+                if len(x):
+                    return x[0]
+                else:
+                    return "bar"
+
+        self.checkScript(fn, (1,))
+        self.checkScript(fn, (1.0,))
+        self.checkScript(fn, (["a", "b", "c"],))
+
+    def test_union_type_refinement_internal_declaration(self):
+        def fn(flag: bool) -> str:
+            x: Union[int, str, None] = None
+            if (flag):
+                y = "foo"
+            else:
+                y = 1
+            if isinstance(x, str):
+                return x
+            else:
+                return "bar"
+
+        self.checkScript(fn, (True,))
+        self.checkScript(fn, (False,))
+
+    def test_union_branching_with_union_return_and_homogenous_types(self):
+        def fn(x: int) -> Union[int, str]:
+            if x % 2:
+                return "foo"
+            else:
+                return "bar"
+
+        self.checkScript(fn, (1,))
+        self.checkScript(fn, (8,))
+
+    def test_union_branching_with_union_return_and_heterogenous_types(self):
+        def fn(x: int) -> Union[int, str]:
+            if x % 2:
+                return "foo"
+            else:
+                return 1
+
+        self.checkScript(fn, (1,))
+        self.checkScript(fn, (8,))
+
+    def test_union_branching_does_not_autoinfer_undeclared_union(self):
+        def fn(x: int) -> str:
+            if x % 2:
+                y = "foo"
+            else:
+                y = x
+            if isinstance(y, str):
+                return y
+            else:
+                return "bar"
+
+        with self.assertRaisesRegex(RuntimeError, "y is set to type str"
+                                    " in the true branch and type int "
+                                    "in the false branch"):
+            torch.jit.script(fn)
+
+    def test_union_branching_does_not_widen_existing_inferred_type(self):
+        def fn(x: int) -> str:
+            y = "foo"
+            if x % 2:
+                y = "bar"
+            else:
+                y = x
+            if isinstance(y, str):
+                return y
+            else:
+                return "baz"
+
+        with self.assertRaisesRegex(RuntimeError, "previously has type "
+                                    "str but is now being assigned to a"
+                                    " value of type int"):
+            torch.jit.script(fn)
+
+    def test_union_schema_matching_on_internal_type(self):
+        def fn(x: Union[List[int], Dict[str, int]]) -> int:
+            if torch.jit.isinstance(x, List[int]):
+                return x[0]
+            else:
+                return list(x.values())[0]
+
+        self.checkScript(fn, ([1, 2, 3],))
+        self.checkScript(fn, ({"foo": 1, "bar": 2, "baz": 3},))
+
+    def test_union_subtractive_refinement(self):
+        def fn(x: Union[List[int], int]) -> int:
+            if not isinstance(x, int):
+                x.append(1)
+                return x[0]
+            else:
+                return x
+
+        self.checkScript(fn, (1,))
+        self.checkScript(fn, ([1, 2, 3],))
+
+    def test_union_subtractive_refinement_with_container(self):
+        def fn(x: Union[List[int], int]) -> int:
+            if not torch.jit.isinstance(x, List[int]):
+                return x
+            else:
+                x.append(1)
+                return x[0]
+
+        self.checkScript(fn, (1,))
+        self.checkScript(fn, ([1, 2, 3],))

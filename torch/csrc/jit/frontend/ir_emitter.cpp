@@ -314,6 +314,13 @@ struct Environment {
     type_table[name] = std::move(type);
   }
 
+  c10::optional<TypePtr> getType(const std::string& name) {
+    if (type_table.find(name) != type_table.end() ) {
+      return type_table[name];
+    }
+    return c10::nullopt;
+  }
+
   SugaredValuePtr findInAnyFrame(const std::string& name) {
     for (auto runner = this; runner; runner = runner->next.get()) {
       if (auto r = runner->findInThisFrame(name)) {
@@ -1015,8 +1022,24 @@ struct to_ir {
     TypePtr declared_return_type =
         def_stack_.back().declared_return_type_; // nullptr if not annotated
     TypePtr type_hint = nullptr;
+
+    // If 1) we have a return statement in one or more branches, and 2)
+    // the type of the expression returned is a subtype of the declared
+    // return type for all branches, then we should use the declared
+    // return type as the `type_hint` when we emit each return
+    // statement. If we don't do this, we'll get an error like "x is set
+    // to type T1 in the true branch and type T2 in the false branch"--
+    // even if `unifyTypes(T1, T2)->isSubtypeOf(declared_return_type)`
+    if (declared_return_type &&
+        (declared_return_type == AnyType::get() ||
+         declared_return_type->kind() == UnionType::Kind ||
+         declared_return_type->kind() == OptionalType::Kind)) {
+      type_hint = declared_return_type;
+    }
+
     Value* actual_return = emitExpr(stmt.expr(), type_hint);
     TypePtr actual_return_type = actual_return->type();
+
     // result type is annotated, every return must convert to that type
     if (declared_return_type) {
       // this guard skips implicit conversion from None -> Tensor for the return
@@ -1153,10 +1176,10 @@ struct to_ir {
       return {};
     }
     // statement must be var {is, is not} None
-    auto name = Var(lhs).name().name();
-    // XXX - while it should in theory be possible to specialize
-    // the `x is None` to know x has type NoneType, we have previously not
-    // done this. Unfortunately, doing this will make the type None
+    const std::string& name = Var(lhs).name().name();
+    // While it should in theory be possible to specialize
+    // the `x is None` to know x has type NoneType, we have previously
+    // not done this. Unfortunately, doing this will make the type None
     // propagate further in all loaded models. The handling of
     // unwrap_optional will fail in these cases since export did
     // not expect that the input would be none and an unannotated None.
@@ -1165,8 +1188,17 @@ struct to_ir {
     // and (2) only enable this OPTIONAL_NONE when loading newer
     // graphs because it is incompatible with older graphs.
     // Refinement none(name, RefinementKind::OPTIONAL_NONE);
-    if (auto optional_type = lhs_value->type()->cast<OptionalType>()) {
+    if (const auto optional_type = lhs_value->type()->cast<OptionalType>()) {
       Refinement present(name, optional_type->getElementType());
+      if (tok == TK_IS) {
+        return RefinementSet({}, {present});
+      } else { // TK_ISNOT
+        return RefinementSet({present}, {});
+      }
+    }
+    if (const auto union_type = lhs_value->type()->cast<UnionType>()) {
+      UnionTypePtr remaining = union_type->withoutNone();
+      Refinement present(name, remaining);
       if (tok == TK_IS) {
         return RefinementSet({}, {present});
       } else { // TK_ISNOT
@@ -1614,8 +1646,7 @@ struct to_ir {
     }
 
     // Register outputs in each block
-    for (const auto& x : mutated_variables) {
-      // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
+    for (const std::string& x : mutated_variables) {
       Value* tv;
       // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
       Value* fv;
@@ -1651,6 +1682,16 @@ struct to_ir {
       }
 
       auto unified = unifyTypes(tv->type(), fv->type());
+
+      // If the variable we're looking at is known to be Union[T1, T2],
+      // then it's okay to have one branch return T1 and the other
+      // return T2. (We're not actually going to use `unified` again;
+      // it's acting as a flag)
+      c10::optional<TypePtr> full_true_type = environment_stack->getType(x);
+      c10::optional<TypePtr> full_false_type = environment_stack->getType(x);
+      if (full_true_type && full_false_type) {
+        unified = unifyTypes(*full_true_type, *full_false_type);
+      }
 
       // attempt to unify the types. we allow variables to be set to different
       // types in each branch as long as that variable is not already in scope,
@@ -1753,22 +1794,74 @@ struct to_ir {
     };
     GatheredTypes gathered(typeParser_);
     gathered.gather(classinfo);
-    auto val = emitExpr(obj);
+    Value* val = emitExpr(obj);
     RefinementSet refinement;
-    if (gathered.types.size() == 1 &&
-        gathered.types.at(0)->isSubtypeOf(val->type()) &&
-        obj.kind() == TK_VAR) {
+
+    TORCH_CHECK(!gathered.types.empty(), "`isinstance` must be used with a "
+                "type or a tuple of types");
+
+    bool all_are_subtypes = std::all_of(gathered.types.begin(), gathered.types.end(),
+                                        [&](const TypePtr t) {
+                                          return t->isSubtypeOf(val->type());
+                                        });
+    if (all_are_subtypes && obj.kind() == TK_VAR) {
       std::string ident = Var(obj).name().name();
-      Refinement isinstance(std::move(ident), gathered.types.at(0));
-      refinement = RefinementSet({isinstance}, {});
+
+      // Get the type to compare against. If we have a tuple of types,
+      // turn the tuple into a Union type to prevent unnecessary extra
+      // logic for single vs. multiple comparisons
+      const TypePtr single_comparison = gathered.types.size() == 1 ?
+                                        gathered.types[0] :
+                                        UnionType::create(gathered.types);
+
+      Refinement isinstance(ident, single_comparison);
+
+      if (val->type()->kind() == UnionType::Kind) {
+        const UnionTypePtr union_type = val->type()->expect<UnionType>();
+
+        std::vector<TypePtr> not_isinstance_types;
+
+        // O(1) lookups of all the types in `gathered.types`
+        std::unordered_set<TypePtr, std::hash<TypePtr>, c10::TypeEqual> dict{
+          gathered.types.begin(), gathered.types.end()};
+
+        for (auto type : union_type->containedTypes()) {
+          // Fast path
+          if (!dict.count(type)) {
+            not_isinstance_types.emplace_back(type);
+            break;
+          }
+          // Check all types in `gathered.types` to see if there's a
+          // common supertype
+          for (const TypePtr comparison_type : gathered.types) {
+            c10::optional<TypePtr> unified = unifyTypes(type, comparison_type);
+            if (!unified) {
+              not_isinstance_types.emplace_back(type);
+            }
+          }
+        }
+
+        if (not_isinstance_types.size() == 1) {
+          Refinement not_isinstance(std::move(ident), not_isinstance_types.at(0));
+          refinement = RefinementSet(isinstance, not_isinstance);
+        } else {
+          auto new_union = UnionType::create(std::move(not_isinstance_types));
+          Refinement not_isinstance(std::move(ident), new_union);
+          refinement = RefinementSet(isinstance, not_isinstance);
+        }
+      } else {
+        refinement = RefinementSet({isinstance}, {});
+      }
     }
 
     if (gathered.staticallyTrue(val->type())) {
       return CondValue(*graph, obj.range(), true, std::move(refinement));
     }
+
     if (gathered.staticallyFalse(val->type())) {
       return CondValue(*graph, obj.range(), false, std::move(refinement));
     }
+
     // check maybe true/false at runtime, need an actual op
     Value* result =
         graph->insertNode(graph->createIsInstance(val, gathered.types))
@@ -3276,7 +3369,9 @@ struct to_ir {
     // AnyType is the only user-exposed type which we don't unify to from
     // its subtypes, so we add a cast for use cases like
     // x : Any = 1 if cond else "str"
-    if (type_hint == AnyType::get() && out_val->type() != AnyType::get()) {
+    if (type_hint &&
+          ((type_hint == AnyType::get() && out_val->type() != AnyType::get()) ||
+          (type_hint->kind() == UnionType::Kind && out_val->type()->kind() != UnionType::Kind))) {
       out_val = graph->insertUncheckedCast(out_val, type_hint);
     }
     return out_val;
