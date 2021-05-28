@@ -1,6 +1,7 @@
 import contextlib
 import io
 import logging
+import os
 import pickle
 import time
 import warnings
@@ -23,6 +24,7 @@ from torch._C._distributed_c10d import (
     ScatterOptions,
     Store,
 )
+from torch._C._distributed_c10d import _get_debug_mode, _DistributedDebugLevel
 from torch._six import string_classes
 
 # This module is wildcard imported from torch.distributed.
@@ -30,7 +32,6 @@ from torch._six import string_classes
 
 from .constants import default_pg_timeout
 from .rendezvous import rendezvous, register_rendezvous_handler  # noqa: F401
-from torch._C._distributed_c10d import _get_debug_mode, _DistributedDebugLevel
 
 _MPI_AVAILABLE = True
 _NCCL_AVAILABLE = True
@@ -661,19 +662,17 @@ def _new_process_group_helper(
         if backend == Backend.GLOO:
             if pg_options is not None:
                 raise RuntimeError("GLOO options not supported")
-            pg = ProcessGroupGloo(
-                prefix_store,
-                rank,
-                world_size,
-                timeout=timeout)
+            pg = ProcessGroupGloo(prefix_store, rank, world_size, timeout=timeout)
             # In debug mode and if GLOO is available, wrap in a wrapper PG that
             # enables enhanced collective checking for debugability.
             if _get_debug_mode() == _DistributedDebugLevel.DETAIL:
                 if not _GLOO_AVAILABLE:
-                    logger.info("""TORCH_DISTRIBUTED_DEBUG was set to DETAIL, but
+                    logger.info(
+                        """TORCH_DISTRIBUTED_DEBUG was set to DETAIL, but
                                 GLOO is not available. Build with Gloo to
                                 create a wrapper process group in debug mode
-                                to aid collective desynchronization debugging.""")
+                                to aid collective desynchronization debugging."""
+                    )
                 else:
                     pg = _create_process_group_wrapper(
                         wrapped_pg=pg,
@@ -681,7 +680,7 @@ def _new_process_group_helper(
                         store=store,
                         rank=rank,
                         world_size=world_size,
-                        timeout=timeout
+                        timeout=timeout,
                     )
             _pg_map[pg] = (Backend.GLOO, store)
             _pg_names[pg] = group_name
@@ -698,19 +697,17 @@ def _new_process_group_helper(
                 pg_options.is_high_priority_stream = False
                 pg_options._timeout = timeout
 
-            pg = ProcessGroupNCCL(
-                prefix_store,
-                rank,
-                world_size,
-                pg_options)
+            pg = ProcessGroupNCCL(prefix_store, rank, world_size, pg_options)
             # In debug mode and if GLOO is available, wrap in a wrapper PG that
             # enables enhanced collective checking for debugability.
             if _get_debug_mode() == _DistributedDebugLevel.DETAIL:
                 if not _GLOO_AVAILABLE:
-                    logger.info("""TORCH_DISTRIBUTED_DEBUG was set to DETAIL, but
+                    logger.info(
+                        """TORCH_DISTRIBUTED_DEBUG was set to DETAIL, but
                                 GLOO is not available. Build with Gloo to
                                 create a wrapper process group in debug mode
-                                to aid collective desynchronization debugging.""")
+                                to aid collective desynchronization debugging."""
+                    )
                 else:
                     pg = _create_process_group_wrapper(
                         wrapped_pg=pg,
@@ -718,7 +715,7 @@ def _new_process_group_helper(
                         store=store,
                         rank=rank,
                         world_size=world_size,
-                        timeout=timeout
+                        timeout=timeout,
                     )
             _pg_map[pg] = (Backend.NCCL, store)
             _pg_names[pg] = group_name
@@ -2645,26 +2642,23 @@ def monitored_barrier(group=GroupMember.WORLD, timeout=None, wait_all_ranks=Fals
     group_to_use = _get_default_group() if group is None else group
     return group_to_use.monitored_barrier(timeout, wait_all_ranks=wait_all_ranks)
 
+
 def _create_process_group_wrapper(
     wrapped_pg: ProcessGroup,
     store_prefix: str,
     store: Store,
     rank: int,
     world_size: int,
-    timeout: timedelta = default_pg_timeout
+    timeout: timedelta = default_pg_timeout,
 ):
     # Create a separate prefix store for the helper process group.
     prefix = f"{PG_WRAPPER_STORE_PREFIX}:{store_prefix}"
     store = PrefixStore(prefix, store)
-    helper_pg = ProcessGroupGloo(
-        store,
-        rank,
-        world_size,
-        timeout=timeout
-    )
+    helper_pg = ProcessGroupGloo(store, rank, world_size, timeout=timeout)
     # Wrap the underlying pg with ProcessGroupWrapper.
     wrapped_pg = _ProcessGroupWrapper(wrapped_pg, helper_pg)
     return wrapped_pg
+
 
 def new_group(ranks=None, timeout=default_pg_timeout, backend=None, pg_options=None):
     """
@@ -2797,3 +2791,124 @@ def new_group(ranks=None, timeout=default_pg_timeout, backend=None, pg_options=N
             pg._set_sequence_number_for_group()
 
     return pg
+
+
+def new_subgroups(
+    ranks_per_subgroup_list=None,
+    group=None,
+    timeout=default_pg_timeout,
+    backend=None,
+    pg_options=None,
+):
+    """
+    Creates subgroups to divide the given main group, and the division is specified by
+    a nested list of ranks. The subgroups can have overlap, and some ranks may not have
+    to be in any subgroup.
+
+    This is a convenience API that calls ``new_group`` to generate multiple subgroups.
+    It requires that all processes in the main group (i.e. all
+    processes that are part of the distributed job) enter this function, even
+    if they are not going to be members of the group.
+    By default, it creates intra-machine subgroups, each of which contains
+    all the ranks of a machine.
+
+    .. warning::
+        Using multiple process groups with the ``NCCL`` backend concurrently
+        is not safe and the user should perform explicit synchronization in
+        their application to ensure only one process group is used at a time.
+        This means collectives from one process group should have completed
+        execution on the device (not just enqueued since CUDA execution is
+        async) before collectives from another process group are enqueued.
+        See `Using multiple NCCL communicators concurrently <https://docs.nvid
+        ia.com/deeplearning/nccl/user-guide/docs/usage/communicators.html#using
+        -multiple-nccl-communicators-concurrently>`_ for more details.
+
+    Args:
+        ranks (list[list[int]]): A nested list of ranks of group members.
+            If ``None``, each inner list corresponds to a machine,
+            and it contains all the ranks of a machine. Default is ``None``.
+        group: (ProcessGroup, optional): The main process group containing
+            all the output subgroups. If None, the default process group will be used.
+            Default is ``None``.
+        timeout (timedelta, optional): Timeout for operations executed against
+            the process group. Default value equals 30 minutes.
+            This is applicable for the ``gloo`` backend. For ``nccl``, this is
+            applicable only if the environment variable ``NCCL_BLOCKING_WAIT``
+            or ``NCCL_ASYNC_ERROR_HANDLING`` is set to 1. When
+            ``NCCL_BLOCKING_WAIT`` is set, this is the duration for which the
+            process will block and wait for collectives to complete before
+            throwing an exception. When ``NCCL_ASYNC_ERROR_HANDLING`` is set,
+            this is the duration after which collectives will be aborted
+            asynchronously and the process will crash. ``NCCL_BLOCKING_WAIT``
+            will provide errors to the user which can be caught and handled,
+            but due to its blocking nature, it has a performance overhead. On
+            the other hand, ``NCCL_ASYNC_ERROR_HANDLING`` has very little
+            performance overhead, but crashes the process on errors. This is
+            done since CUDA execution is async and it is no longer safe to
+            continue executing user code since failed async NCCL operations
+            might result in subsequent CUDA operations running on corrupted
+            data. Only one of these two environment variables should be set.
+        backend (str or Backend, optional): The backend to use. Depending on
+            build-time configurations, valid values are ``gloo`` and ``nccl``.
+            By default uses the same backend as the global group. This field
+            should be given as a lowercase string (e.g., ``"gloo"``), which can
+            also be accessed via :class:`Backend` attributes (e.g.,
+            ``Backend.GLOO``). If ``None`` is passed in, the backend
+            corresponding to the default process group will be used. Default is
+            ``None``.
+        pg_options (ProcessGroupOptions, optional): process group options
+            specifying what additional options need to be passed in during
+            the construction of specific process groups. i.e. for the ``nccl``
+            backend, is_high_priority_stream can be specified so that process
+            group can pick up high priority cuda streams.
+
+    Returns:
+        The subgroup containing the current rank, and all the subgroups used for cleanup.
+    """
+    subgroups = []
+    cur_subgroup = None
+    if ranks_per_subgroup_list:
+        for ranks in ranks_per_subgroup_list:
+            subgroup = new_group(
+                ranks=ranks, timeout=timeout, backend=backend, pg_options=pg_options
+            )
+            subgroups.append(subgroup)
+
+            rank = get_rank()
+            if rank in ranks:
+                cur_subgroup = subgroup
+                logger.info("Rank {} is assigned to subgroup {}".format(rank, ranks))
+        return cur_subgroup, subgroups
+
+    # By default, create one subgroup per machine.
+    # Assume that each machine has the same number of devices.
+    num_devices_per_machine = (
+        torch.cuda.device_count()
+        if torch.cuda.is_available()
+        else (os.cpu_count() or 1)
+    )
+    # If the given main group does not use all the devices,
+    # then the number of devices used by the subgroup should exceed the world size.
+    num_devices_per_machine = min(get_world_size(group), num_devices_per_machine)
+    for machine_rank in range(get_world_size(group) // num_devices_per_machine):
+        start_rank = machine_rank * num_devices_per_machine
+        end_rank = start_rank + num_devices_per_machine
+        per_machine_ranks = list(range(start_rank, end_rank))
+        subgroup = new_group(
+            ranks=per_machine_ranks,
+            timeout=timeout,
+            backend=backend,
+            pg_options=pg_options,
+        )
+        subgroups.append(subgroup)
+
+        rank = get_rank(group)
+        if rank >= start_rank and rank < end_rank:
+            cur_subgroup = subgroup
+            logger.info(
+                "Rank {} is assigned to per-machine subgroup {}".format(
+                    rank, per_machine_ranks
+                )
+            )
+
+    return cur_subgroup, subgroups
