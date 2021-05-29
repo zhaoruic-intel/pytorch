@@ -3,13 +3,15 @@ from models.DummyModel import DummyModel
 from servers.AverageBatchParameterServer import AverageBatchParameterServer
 from servers.AverageParameterServer import AverageParameterServer
 from trainers.DdpNcclTrainer import DdpNcclTrainer
+from trainers.DdpSparseDenseRpcTrainer import DdpSparseDenseRpcTrainer
 from trainers.DdpSparseRpcTrainer import DdpSparseRpcTrainer
 from trainers.DdpTrainer import DdpTrainer
 
 trainer_map = {
     "DdpNcclTrainer": DdpNcclTrainer,
     "DdpTrainer": DdpTrainer,
-    "DdpSparseRpcTrainer": DdpSparseRpcTrainer
+    "DdpSparseRpcTrainer": DdpSparseRpcTrainer,
+    "DdpSparseDenseRpcTrainer": DdpSparseDenseRpcTrainer
 }
 
 server_map = {
