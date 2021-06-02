@@ -270,6 +270,11 @@ void GeluKernelImpl(TensorIterator& it) {
       GeluMKLKernelImpl<scalar_t>(&it);
     });
   } else {
+    auto grain_size = at::internal::GRAIN_SIZE;
+    constexpr int64_t GELU_MIN_ELEMENTS_FOR_MULTI_THREADING{128};
+    if (it.numel() > GELU_MIN_ELEMENTS_FOR_MULTI_THREADING) {
+      grain_size = it.numel() / at::get_num_threads();
+    }
     AT_DISPATCH_FLOATING_TYPES(it.dtype(), "GeluKernelImpl", [&]() {
       using Vec = vec::Vectorized<scalar_t>;
       const Vec kAlphaVec(M_SQRT1_2);
@@ -284,7 +289,8 @@ void GeluKernelImpl(TensorIterator& it) {
           [&](Vec x_vec) {
             return x_vec * kPointFiveVec *
                 (kOneVec + (x_vec * kAlphaVec).erf());
-          });
+          },
+          grain_size);
     });
   }
 }
