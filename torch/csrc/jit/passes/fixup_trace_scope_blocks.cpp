@@ -495,7 +495,7 @@ void runCleanupPasses(const std::shared_ptr<Graph>& g) {
         Inline(*subgraph);
       }
       convertTracedForksToRealForks(subgraph);
-      LowerSimpleTuples(subgraph);
+      lowerSimpleTuples(subgraph);
       EliminateDeadCode(subgraph);
       LintGraph(subgraph);
     }
@@ -504,7 +504,7 @@ void runCleanupPasses(const std::shared_ptr<Graph>& g) {
     Inline(*g);
   }
   convertTracedForksToRealForks(g);
-  LowerSimpleTuples(g);
+  lowerSimpleTuples(g);
   EliminateDeadCode(g);
   LintGraph(g);
 }
