@@ -1911,6 +1911,58 @@ std::vector<For*> LoopNest::reorder(
   return result;
 }
 
+std::vector<For*> LoopNest::tile(For* x, For* y, int x_factor, int y_factor) {
+  auto parent = dynamic_cast<Block*>(x->get_parent());
+  if (parent == nullptr) {
+    throw malformed_input("parent of the loops must be a Block");
+  }
+  if (!areLoopsPerfectlyNested({x, y})) {
+    throw malformed_input("two loops must be perfectly nested");
+  }
+
+  // Split x, y axes by x_factor and y_factor
+  For *yi, *ytail;
+  splitWithTail(y, y_factor, &yi, &ytail);
+  For *xi, *xtail;
+  splitWithTail(x, x_factor, &xi, &xtail);
+
+  // Distribute xi over yo and ytail so we can manipulate the loop order of {xo,
+  // xi, yo, yi}
+  auto loops = distributeLoop(xi);
+
+  // For {xo, xi, yo, yi}, reorder the axes to be xo, yo, xi, yi
+  xi = loops.front();
+  For* yo = dynamic_cast<For*>(xi->body()->stmts().front());
+  CHECK(yo);
+  reorderAxis(xi, yo);
+
+  // Re-Identify loop handles of yo, xi, yi, ytail
+  For* xo = x;
+  yo = dynamic_cast<For*>(xo->body()->stmts().front());
+  CHECK(yo);
+  xi = dynamic_cast<For*>(yo->body()->stmts().front());
+  CHECK(xi);
+  yi = dynamic_cast<For*>(xi->body()->stmts().front());
+  CHECK(yi);
+
+  if (ytail) {
+    ytail = dynamic_cast<For*>(xo->body()->stmts().back());
+    CHECK(ytail);
+    ytail = dynamic_cast<For*>(ytail->body()->stmts().front());
+    CHECK(ytail);
+  }
+
+  std::vector<For*> result;
+  result.push_back(xo);
+  result.push_back(yo);
+  result.push_back(xi);
+  result.push_back(yi);
+  result.push_back(xtail);
+  result.push_back(ytail);
+
+  return result;
+}
+
 bool LoopNest::areLoopsPerfectlyNested(const std::vector<For*>& loops) {
   if (loops.size() < 2) {
     return true;
