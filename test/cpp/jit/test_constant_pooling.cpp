@@ -93,7 +93,7 @@ graph():
 }
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-TEST(constantPoolingTest, DictConstantPooling) {
+TEST(constantPoolingTest, DictconstantPooling) {
   auto graph = std::make_shared<Graph>();
   parseIR(
       R"IR(
